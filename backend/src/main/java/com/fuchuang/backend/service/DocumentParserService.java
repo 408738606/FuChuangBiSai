@@ -19,12 +19,13 @@ import java.util.List;
 public class DocumentParserService {
 
     public String parse(Path path, String extension) {
+        Path safePath = normalizeReadablePath(path);
         String ext = extension.toLowerCase();
         try {
             return switch (ext) {
-                case "txt", "md" -> Files.readString(path, StandardCharsets.UTF_8);
-                case "docx" -> parseDocx(path);
-                case "xlsx" -> parseXlsx(path);
+                case "txt", "md" -> Files.readString(safePath, StandardCharsets.UTF_8);
+                case "docx" -> parseDocx(safePath);
+                case "xlsx" -> parseXlsx(safePath);
                 default -> "";
             };
         } catch (IOException e) {
@@ -70,5 +71,13 @@ public class DocumentParserService {
             }
             return sb.toString();
         }
+    }
+
+    private Path normalizeReadablePath(Path path) {
+        Path normalized = path.toAbsolutePath().normalize();
+        if (!Files.exists(normalized) || !Files.isRegularFile(normalized)) {
+            throw new IllegalArgumentException("Invalid file path.");
+        }
+        return normalized;
     }
 }

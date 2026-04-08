@@ -38,7 +38,7 @@ public class FileStorageService {
 
     public Path saveUpload(MultipartFile file) {
         String name = sanitize(file.getOriginalFilename());
-        Path target = uploadDir.resolve(UUID.randomUUID() + "_" + name);
+        Path target = safeResolve(uploadDir, UUID.randomUUID() + "_" + name);
         try {
             Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
             return target;
@@ -48,7 +48,7 @@ public class FileStorageService {
     }
 
     public Path saveGenerated(String fileName, byte[] bytes) {
-        Path target = outputDir.resolve(UUID.randomUUID() + "_" + sanitize(fileName));
+        Path target = safeResolve(outputDir, UUID.randomUUID() + "_" + sanitize(fileName));
         try {
             Files.write(target, bytes);
             return target;
@@ -58,9 +58,13 @@ public class FileStorageService {
     }
 
     public Path copyToUploads(Path sourcePath, String preferredName) {
-        Path target = uploadDir.resolve(UUID.randomUUID() + "_" + sanitize(preferredName));
+        Path source = sourcePath.toAbsolutePath().normalize();
+        if (!Files.exists(source) || !Files.isRegularFile(source)) {
+            throw new IllegalArgumentException("Invalid source path.");
+        }
+        Path target = safeResolve(uploadDir, UUID.randomUUID() + "_" + sanitize(preferredName));
         try {
-            Files.copy(sourcePath, target, StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
             return target;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -75,6 +79,18 @@ public class FileStorageService {
         if (input == null || input.isBlank()) {
             return "file.dat";
         }
-        return input.replaceAll("[\\\\/:*?\"<>|]", "_");
+        String sanitized = input.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+        if (sanitized.contains("..")) {
+            throw new IllegalArgumentException("Invalid file name.");
+        }
+        return sanitized.isBlank() ? "file.dat" : sanitized;
+    }
+
+    private Path safeResolve(Path baseDir, String fileName) {
+        Path resolved = baseDir.resolve(fileName).normalize();
+        if (!resolved.startsWith(baseDir)) {
+            throw new IllegalArgumentException("Illegal file path.");
+        }
+        return resolved;
     }
 }
