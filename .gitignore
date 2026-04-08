@@ -1,0 +1,12 @@
+# Java
+backend/target/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Runtime data
+backend/data/
+
+# OS
+.DS_Store

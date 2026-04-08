@@ -42,7 +42,7 @@ public class OutputService {
         };
 
         Path saved = storageService.saveGenerated(fileName, bytes);
-        OutputRecord record = new OutputRecord(UUID.randomUUID().toString(), fileName, ext, saved.toString(), Instant.now(), preview(content));
+        OutputRecord record = new OutputRecord(UUID.randomUUID().toString(), fileName, ext, saved.toString(), Instant.now(), previewText(content));
         outputs.put(record.id(), record);
         return toDto(record);
     }
@@ -111,7 +111,7 @@ public class OutputService {
         for (DocumentRecord source : sources) {
             sb.append("- ").append(source.name()).append("\n");
             String text = knowledgeBaseService.previewText(source.id());
-            sb.append(preview(text)).append("\n\n");
+            sb.append(previewText(text)).append("\n\n");
         }
         return sb.toString();
     }
@@ -173,7 +173,7 @@ public class OutputService {
         }
     }
 
-    private String preview(String text) {
+    private String previewText(String text) {
         if (text == null) return "";
         return text.length() <= 600 ? text : text.substring(0, 600) + "...";
     }
