@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 
-const API_BASE = 'http://localhost:8080/api'
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080/api'
 const tabs = ['对话任务', '知识库', '模型配置', '输出中心']
 const activeTab = ref(tabs[0])
 

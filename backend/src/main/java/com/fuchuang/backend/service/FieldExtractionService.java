@@ -135,6 +135,7 @@ public class FieldExtractionService {
                 return true;
             }
         }
+        // Keep lines without explicit date markers, because many指标行仅在上级标题声明日期范围。
         return !foundDate;
     }
 

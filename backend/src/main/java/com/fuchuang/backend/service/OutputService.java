@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 
 @Service
 public class OutputService {
-    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{(.+?)}}|【(.+?)】|\\$\\{(.+?)}");
+    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([^{}]+)}}|【([^】]+)】|\\$\\{([^{}]+)}");
 
     private final FileStorageService storageService;
     private final KnowledgeBaseService knowledgeBaseService;
