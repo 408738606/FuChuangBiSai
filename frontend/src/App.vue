@@ -1,10 +1,12 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080/api'
+const SESSION_STORAGE_KEY = 'fuchuang.chat.sessions.v1'
 
 const loading = ref(false)
 const uploadLoading = ref(false)
+const isDragOver = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
 
@@ -19,10 +21,12 @@ const docs = ref([])
 const outputs = ref([])
 const modelConfig = ref({ mode: 'LOCAL', apiBaseUrl: '', apiKey: '', modelName: 'local-rag-agent' })
 
-const chatMessages = ref([])
+const sessions = ref([])
+const activeSessionId = ref('')
 const selectedUploadFiles = ref([])
 const docPreview = ref('')
 const outputPreview = ref('')
+const messagesRef = ref(null)
 
 const quickPrompts = [
   '请基于已上传文档提取关键指标并生成xlsx结果文件',
@@ -31,6 +35,8 @@ const quickPrompts = [
 ]
 
 const selectedDocs = computed(() => docs.value.filter((d) => selectedDocIds.value.includes(d.id)))
+const activeSession = computed(() => sessions.value.find((s) => s.id === activeSessionId.value) || null)
+const sessionMessages = computed(() => activeSession.value?.messages || [])
 
 const fetchJson = async (url, options = {}) => {
   const res = await fetch(url, options)
@@ -58,6 +64,163 @@ const loadModelConfig = async () => {
   modelConfig.value = await fetchJson(`${API_BASE}/models/config`)
 }
 
+const nowIso = () => new Date().toISOString()
+
+const createSessionObject = (title = '新会话') => ({
+  id: crypto.randomUUID(),
+  title,
+  createdAt: nowIso(),
+  updatedAt: nowIso(),
+  context: {
+    outputFormat: 'txt',
+    createOutput: true,
+    saveOutputToKb: false,
+    templateDocumentId: '',
+    selectedDocIds: [],
+  },
+  messages: [
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      text: '你好，我是任务助手。请上传文档并描述你的任务目标，我会在对话中完成抽取、填表、生成与下载。',
+      createdAt: nowIso(),
+    },
+  ],
+})
+
+const persistSessions = () => {
+  localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessions: sessions.value, activeSessionId: activeSessionId.value }))
+}
+
+const loadSessions = () => {
+  const raw = localStorage.getItem(SESSION_STORAGE_KEY)
+  if (!raw) return false
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed.sessions) || !parsed.sessions.length) return false
+    sessions.value = parsed.sessions
+    activeSessionId.value = parsed.activeSessionId || parsed.sessions[0].id
+    if (!sessions.value.some((s) => s.id === activeSessionId.value)) {
+      activeSessionId.value = sessions.value[0].id
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+const scrollToBottom = () => {
+  nextTick(() => {
+    const el = messagesRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+const applySessionContext = (session) => {
+  if (!session) return
+  outputFormat.value = session.context?.outputFormat || 'txt'
+  createOutput.value = session.context?.createOutput ?? true
+  saveOutputToKb.value = session.context?.saveOutputToKb ?? false
+  templateDocumentId.value = session.context?.templateDocumentId || ''
+  selectedDocIds.value = session.context?.selectedDocIds || []
+  scrollToBottom()
+}
+
+const updateActiveSession = (updater) => {
+  const idx = sessions.value.findIndex((s) => s.id === activeSessionId.value)
+  if (idx < 0) return
+  const current = sessions.value[idx]
+  const copy = {
+    ...current,
+    context: { ...(current.context || {}) },
+    messages: [...(current.messages || [])],
+  }
+  updater(copy)
+  copy.updatedAt = nowIso()
+  sessions.value.splice(idx, 1, copy)
+}
+
+const pushMessage = (msg) => {
+  updateActiveSession((session) => {
+    session.messages.push(msg)
+    if (msg.role === 'user' && session.title === '新会话') {
+      session.title = msg.text.slice(0, 16) || '新会话'
+    }
+  })
+  scrollToBottom()
+}
+
+const updateMessage = (id, updater) => {
+  updateActiveSession((session) => {
+    const idx = session.messages.findIndex((m) => m.id === id)
+    if (idx < 0) return
+    const msg = { ...session.messages[idx] }
+    updater(msg)
+    session.messages.splice(idx, 1, msg)
+  })
+  scrollToBottom()
+}
+
+const createSession = () => {
+  const s = createSessionObject()
+  sessions.value = [s, ...sessions.value]
+  activeSessionId.value = s.id
+  applySessionContext(s)
+}
+
+const switchSession = (id) => {
+  activeSessionId.value = id
+}
+
+const deleteSession = (id) => {
+  if (sessions.value.length <= 1) return
+  const filtered = sessions.value.filter((s) => s.id !== id)
+  sessions.value = filtered
+  if (activeSessionId.value === id) {
+    activeSessionId.value = filtered[0].id
+  }
+}
+
+const renameSession = (session) => {
+  const next = window.prompt('输入会话名称', session.title)
+  if (!next || !next.trim()) return
+  const title = next.trim().slice(0, 32)
+  const idx = sessions.value.findIndex((s) => s.id === session.id)
+  if (idx < 0) return
+  sessions.value[idx] = { ...sessions.value[idx], title, updatedAt: nowIso() }
+}
+
+const setUploadFiles = (files) => {
+  const merged = [...selectedUploadFiles.value, ...files]
+  const map = new Map()
+  merged.forEach((f) => map.set(`${f.name}-${f.size}-${f.lastModified}`, f))
+  selectedUploadFiles.value = [...map.values()]
+}
+
+const onUploadSelected = (e) => {
+  setUploadFiles([...(e.target.files || [])])
+}
+
+const onDragOver = (e) => {
+  e.preventDefault()
+  isDragOver.value = true
+}
+
+const onDragLeave = (e) => {
+  e.preventDefault()
+  isDragOver.value = false
+}
+
+const onDrop = (e) => {
+  e.preventDefault()
+  isDragOver.value = false
+  setUploadFiles([...(e.dataTransfer?.files || [])])
+}
+
+const removeUploadFile = (idx) => {
+  selectedUploadFiles.value.splice(idx, 1)
+}
+
 const uploadFilesToKb = async () => {
   if (!selectedUploadFiles.value.length) return
   uploadLoading.value = true
@@ -76,11 +239,11 @@ const uploadFilesToKb = async () => {
     uploaded.forEach((d) => merged.add(d.id))
     selectedDocIds.value = [...merged]
 
-    chatMessages.value.push({
+    pushMessage({
       id: crypto.randomUUID(),
       role: 'system',
-      text: `已上传 ${uploaded.length} 个文档并自动加入本轮任务数据源。`,
-      createdAt: new Date().toISOString(),
+      text: `已上传 ${uploaded.length} 个文档并自动加入本会话数据源。`,
+      createdAt: nowIso(),
     })
 
     selectedUploadFiles.value = []
@@ -92,24 +255,49 @@ const uploadFilesToKb = async () => {
   }
 }
 
-const onUploadSelected = (e) => {
-  selectedUploadFiles.value = [...(e.target.files || [])]
+const renderTypewriter = async (messageId, fullText) => {
+  if (!fullText) {
+    updateMessage(messageId, (msg) => {
+      msg.text = ''
+      msg.typing = false
+    })
+    return
+  }
+
+  const step = fullText.length > 500 ? 8 : 3
+  for (let i = step; i <= fullText.length + step; i += step) {
+    const nextText = fullText.slice(0, i)
+    updateMessage(messageId, (msg) => {
+      msg.text = nextText
+      msg.typing = i < fullText.length
+    })
+    await new Promise((resolve) => setTimeout(resolve, 16))
+  }
 }
 
 const sendChat = async () => {
   const trimmed = message.value.trim()
-  if (!trimmed) return
+  if (!trimmed || !activeSession.value) return
 
   clearFeedback()
   loading.value = true
 
-  chatMessages.value.push({
+  pushMessage({
     id: crypto.randomUUID(),
     role: 'user',
     text: trimmed,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
     selectedDocs: selectedDocs.value.map((d) => d.name),
     outputFormat: outputFormat.value,
+  })
+
+  const assistantId = crypto.randomUUID()
+  pushMessage({
+    id: assistantId,
+    role: 'assistant',
+    text: '',
+    typing: true,
+    createdAt: nowIso(),
   })
 
   try {
@@ -128,15 +316,14 @@ const sendChat = async () => {
       body: JSON.stringify(payload),
     })
 
-    chatMessages.value.push({
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      text: data.answer || '',
-      createdAt: new Date().toISOString(),
-      citations: data.citations || [],
-      outputs: data.outputs || [],
-      trace: data.trace || [],
-      mappedFields: data.mappedFields || {},
+    await renderTypewriter(assistantId, data.answer || '')
+
+    updateMessage(assistantId, (msg) => {
+      msg.citations = data.citations || []
+      msg.outputs = data.outputs || []
+      msg.trace = data.trace || []
+      msg.mappedFields = data.mappedFields || {}
+      msg.typing = false
     })
 
     message.value = ''
@@ -144,11 +331,9 @@ const sendChat = async () => {
     successMessage.value = '任务执行成功'
   } catch (e) {
     errorMessage.value = e.message || '任务执行失败'
-    chatMessages.value.push({
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      text: `执行失败：${errorMessage.value}`,
-      createdAt: new Date().toISOString(),
+    updateMessage(assistantId, (msg) => {
+      msg.text = `执行失败：${errorMessage.value}`
+      msg.typing = false
     })
   } finally {
     loading.value = false
@@ -199,16 +384,40 @@ const downloadUrl = (type, id) => {
   return `${API_BASE}/outputs/${id}/download`
 }
 
+watch(activeSessionId, () => {
+  applySessionContext(activeSession.value)
+  persistSessions()
+})
+
+watch(
+  [outputFormat, createOutput, saveOutputToKb, templateDocumentId, selectedDocIds],
+  () => {
+    updateActiveSession((session) => {
+      session.context = {
+        outputFormat: outputFormat.value,
+        createOutput: createOutput.value,
+        saveOutputToKb: saveOutputToKb.value,
+        templateDocumentId: templateDocumentId.value,
+        selectedDocIds: [...selectedDocIds.value],
+      }
+    })
+  },
+  { deep: true },
+)
+
+watch(sessions, persistSessions, { deep: true })
+
 onMounted(async () => {
   await Promise.all([loadDocs(), loadOutputs(), loadModelConfig()])
-  chatMessages.value = [
-    {
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      text: '你好，我是任务助手。请上传文档并描述你的任务目标，我会在对话中完成抽取、填表、生成与下载。',
-      createdAt: new Date().toISOString(),
-    },
-  ]
+
+  if (!loadSessions()) {
+    const init = createSessionObject('默认会话')
+    sessions.value = [init]
+    activeSessionId.value = init.id
+    persistSessions()
+  }
+
+  applySessionContext(activeSession.value)
 })
 </script>
 
@@ -217,7 +426,7 @@ onMounted(async () => {
     <header class="topbar">
       <div>
         <h1>FuChuang 智能任务对话台</h1>
-        <p>所有任务在同一对话中完成：上传文档 → 描述任务 → 获取可预览/可下载结果。</p>
+        <p>会话持久化 + 打字机输出 + 拖拽上传 + 任务对话一体化</p>
       </div>
       <div class="status" v-if="selectedDocs.length">已选数据源：{{ selectedDocs.length }}</div>
     </header>
@@ -226,16 +435,41 @@ onMounted(async () => {
     <div class="banner error" v-if="errorMessage">{{ errorMessage }}</div>
 
     <div class="layout">
+      <aside class="session-panel card">
+        <div class="panel-header">
+          <h3>会话列表</h3>
+          <button class="primary" @click="createSession">+ 新建</button>
+        </div>
+        <div class="session-list">
+          <button
+            class="session-item"
+            :class="{ active: s.id === activeSessionId }"
+            v-for="s in sessions"
+            :key="s.id"
+            @click="switchSession(s.id)"
+          >
+            <div class="session-main">
+              <div class="session-title">{{ s.title }}</div>
+              <div class="session-time">{{ (s.updatedAt || '').replace('T', ' ').slice(0, 16) }}</div>
+            </div>
+            <div class="session-actions">
+              <span @click.stop="renameSession(s)">✎</span>
+              <span @click.stop="deleteSession(s.id)">✕</span>
+            </div>
+          </button>
+        </div>
+      </aside>
+
       <section class="chat-panel">
         <div class="card quick-prompts">
           <button class="chip" v-for="prompt in quickPrompts" :key="prompt" @click="usePrompt(prompt)">{{ prompt }}</button>
         </div>
 
-        <div class="card messages">
-          <article class="msg" :class="msg.role" v-for="msg in chatMessages" :key="msg.id">
+        <div class="card messages" ref="messagesRef">
+          <article class="msg" :class="msg.role" v-for="msg in sessionMessages" :key="msg.id">
             <div class="avatar">{{ msg.role === 'user' ? '我' : msg.role === 'assistant' ? 'AI' : 'SYS' }}</div>
             <div class="bubble">
-              <div class="content">{{ msg.text }}</div>
+              <div class="content">{{ msg.text }}<span class="typing-cursor" v-if="msg.typing">▋</span></div>
 
               <div class="meta" v-if="msg.selectedDocs?.length">来源文档：{{ msg.selectedDocs.join('、') }}</div>
 
@@ -276,6 +510,17 @@ onMounted(async () => {
         </div>
 
         <div class="card composer">
+          <div class="drop-zone" :class="{ active: isDragOver }" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop">
+            拖拽文档到此处，或使用下方文件选择
+          </div>
+
+          <div class="upload-list" v-if="selectedUploadFiles.length">
+            <span class="upload-tag" v-for="(f, idx) in selectedUploadFiles" :key="f.name + f.size + f.lastModified">
+              {{ f.name }}
+              <b @click="removeUploadFile(idx)">×</b>
+            </span>
+          </div>
+
           <div class="row">
             <textarea v-model="message" rows="3" placeholder="输入任务需求，例如：请从附件中提取字段并自动填充模板，输出xlsx" />
           </div>
