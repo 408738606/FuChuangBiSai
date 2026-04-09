@@ -3,6 +3,10 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080/api'
 const SESSION_STORAGE_KEY = 'fuchuang.chat.sessions.v1'
+const TYPEWRITER_LONG_MESSAGE_THRESHOLD = 500
+const TYPEWRITER_FAST_STEP_SIZE = 8
+const TYPEWRITER_NORMAL_STEP_SIZE = 3
+const TYPEWRITER_FRAME_DELAY_MS = 16
 
 const loading = ref(false)
 const uploadLoading = ref(false)
@@ -264,14 +268,17 @@ const renderTypewriter = async (messageId, fullText) => {
     return
   }
 
-  const step = fullText.length > 500 ? 8 : 3
+  const step =
+    fullText.length > TYPEWRITER_LONG_MESSAGE_THRESHOLD
+      ? TYPEWRITER_FAST_STEP_SIZE
+      : TYPEWRITER_NORMAL_STEP_SIZE
   for (let i = step; i <= fullText.length + step; i += step) {
     const nextText = fullText.slice(0, i)
     updateMessage(messageId, (msg) => {
       msg.text = nextText
       msg.typing = i < fullText.length
     })
-    await new Promise((resolve) => setTimeout(resolve, 16))
+    await new Promise((resolve) => setTimeout(resolve, TYPEWRITER_FRAME_DELAY_MS))
   }
 }
 
