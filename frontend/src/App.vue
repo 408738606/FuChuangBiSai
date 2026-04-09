@@ -2,42 +2,35 @@
 import { computed, onMounted, ref } from 'vue'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080/api'
-const tabs = ['对话任务', '知识库', '模型配置', '输出中心']
-const activeTab = ref(tabs[0])
+
+const loading = ref(false)
+const uploadLoading = ref(false)
+const errorMessage = ref('')
+const successMessage = ref('')
 
 const message = ref('')
 const outputFormat = ref('txt')
 const createOutput = ref(true)
 const saveOutputToKb = ref(false)
 const templateDocumentId = ref('')
-const sourceDocumentIds = ref([])
-
-const chatAnswer = ref('')
-const chatCitations = ref([])
-const chatOutputs = ref([])
-const chatTrace = ref([])
-const mappedFields = ref({})
+const selectedDocIds = ref([])
 
 const docs = ref([])
-const selectedUpload = ref(null)
-const docPreview = ref('')
-
+const outputs = ref([])
 const modelConfig = ref({ mode: 'LOCAL', apiBaseUrl: '', apiKey: '', modelName: 'local-rag-agent' })
 
-const outputs = ref([])
+const chatMessages = ref([])
+const selectedUploadFiles = ref([])
+const docPreview = ref('')
 const outputPreview = ref('')
 
-const loading = ref(false)
-const errorMessage = ref('')
-const successMessage = ref('')
-
 const quickPrompts = [
-  '请根据已上传文档提取“2024年杭州空气质量优良天数”并生成xlsx',
-  '从知识库中抽取“城市+GDP+同比”字段并按表头自动填充模板',
-  '筛选2020/7/1~2020/8/31期间上海市相关指标并输出docx',
+  '请基于已上传文档提取关键指标并生成xlsx结果文件',
+  '根据模板文件自动映射字段并输出docx，未命中字段请标注',
+  '请筛选指定日期区间的数据，完成表格填充并返回下载文件',
 ]
 
-const totalMappedFields = computed(() => Object.keys(mappedFields.value || {}).length)
+const selectedDocs = computed(() => docs.value.filter((d) => selectedDocIds.value.includes(d.id)))
 
 const fetchJson = async (url, options = {}) => {
   const res = await fetch(url, options)
@@ -48,15 +41,9 @@ const fetchJson = async (url, options = {}) => {
   return res.json()
 }
 
-const withFeedback = async (action, successText) => {
+const clearFeedback = () => {
   errorMessage.value = ''
   successMessage.value = ''
-  try {
-    await action()
-    successMessage.value = successText
-  } catch (e) {
-    errorMessage.value = e.message || '请求失败'
-  }
 }
 
 const loadDocs = async () => {
@@ -71,54 +58,98 @@ const loadModelConfig = async () => {
   modelConfig.value = await fetchJson(`${API_BASE}/models/config`)
 }
 
-const uploadFile = async () => {
-  if (!selectedUpload.value) return
-  await withFeedback(async () => {
-    const form = new FormData()
-    form.append('file', selectedUpload.value)
-    await fetchJson(`${API_BASE}/kb/upload`, { method: 'POST', body: form })
-    selectedUpload.value = null
+const uploadFilesToKb = async () => {
+  if (!selectedUploadFiles.value.length) return
+  uploadLoading.value = true
+  clearFeedback()
+  try {
+    const uploaded = []
+    for (const file of selectedUploadFiles.value) {
+      const form = new FormData()
+      form.append('file', file)
+      const data = await fetchJson(`${API_BASE}/kb/upload`, { method: 'POST', body: form })
+      uploaded.push(data)
+    }
+
     await loadDocs()
-  }, '文件上传并入库成功')
+    const merged = new Set(selectedDocIds.value)
+    uploaded.forEach((d) => merged.add(d.id))
+    selectedDocIds.value = [...merged]
+
+    chatMessages.value.push({
+      id: crypto.randomUUID(),
+      role: 'system',
+      text: `已上传 ${uploaded.length} 个文档并自动加入本轮任务数据源。`,
+      createdAt: new Date().toISOString(),
+    })
+
+    selectedUploadFiles.value = []
+    successMessage.value = '文档上传完成'
+  } catch (e) {
+    errorMessage.value = e.message || '上传失败'
+  } finally {
+    uploadLoading.value = false
+  }
 }
 
 const onUploadSelected = (e) => {
-  selectedUpload.value = e.target.files?.[0] || null
-}
-
-const previewDocument = async (id) => {
-  errorMessage.value = ''
-  const res = await fetch(`${API_BASE}/kb/documents/${id}/preview`)
-  docPreview.value = await res.text()
+  selectedUploadFiles.value = [...(e.target.files || [])]
 }
 
 const sendChat = async () => {
+  const trimmed = message.value.trim()
+  if (!trimmed) return
+
+  clearFeedback()
   loading.value = true
-  errorMessage.value = ''
-  successMessage.value = ''
+
+  chatMessages.value.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    text: trimmed,
+    createdAt: new Date().toISOString(),
+    selectedDocs: selectedDocs.value.map((d) => d.name),
+    outputFormat: outputFormat.value,
+  })
+
   try {
     const payload = {
-      message: message.value,
+      message: trimmed,
       outputFormat: outputFormat.value,
       createOutput: createOutput.value,
       saveOutputToKb: saveOutputToKb.value,
       templateDocumentId: templateDocumentId.value || null,
-      sourceDocumentIds: sourceDocumentIds.value,
+      sourceDocumentIds: selectedDocIds.value,
     }
+
     const data = await fetchJson(`${API_BASE}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    chatAnswer.value = data.answer || ''
-    chatCitations.value = data.citations || []
-    chatOutputs.value = data.outputs || []
-    chatTrace.value = data.trace || []
-    mappedFields.value = data.mappedFields || {}
+
+    chatMessages.value.push({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      text: data.answer || '',
+      createdAt: new Date().toISOString(),
+      citations: data.citations || [],
+      outputs: data.outputs || [],
+      trace: data.trace || [],
+      mappedFields: data.mappedFields || {},
+    })
+
+    message.value = ''
     await loadOutputs()
     successMessage.value = '任务执行成功'
   } catch (e) {
     errorMessage.value = e.message || '任务执行失败'
+    chatMessages.value.push({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      text: `执行失败：${errorMessage.value}`,
+      createdAt: new Date().toISOString(),
+    })
   } finally {
     loading.value = false
   }
@@ -129,26 +160,38 @@ const usePrompt = (prompt) => {
 }
 
 const updateModelConfig = async () => {
-  await withFeedback(async () => {
+  clearFeedback()
+  try {
     await fetchJson(`${API_BASE}/models/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(modelConfig.value),
     })
-  }, '模型配置已保存')
+    successMessage.value = '模型配置已保存'
+  } catch (e) {
+    errorMessage.value = e.message || '模型配置保存失败'
+  }
+}
+
+const previewDocument = async (id) => {
+  const res = await fetch(`${API_BASE}/kb/documents/${id}/preview`)
+  docPreview.value = await res.text()
 }
 
 const previewOutput = async (id) => {
-  errorMessage.value = ''
   const res = await fetch(`${API_BASE}/outputs/${id}/preview`)
   outputPreview.value = await res.text()
 }
 
 const saveOutputToKnowledge = async (id) => {
-  await withFeedback(async () => {
+  clearFeedback()
+  try {
     await fetchJson(`${API_BASE}/outputs/${id}/save-to-kb`, { method: 'POST' })
     await loadDocs()
-  }, '产物已保存到知识库')
+    successMessage.value = '产物已保存到知识库'
+  } catch (e) {
+    errorMessage.value = e.message || '保存失败'
+  }
 }
 
 const downloadUrl = (type, id) => {
@@ -158,176 +201,165 @@ const downloadUrl = (type, id) => {
 
 onMounted(async () => {
   await Promise.all([loadDocs(), loadOutputs(), loadModelConfig()])
+  chatMessages.value = [
+    {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      text: '你好，我是任务助手。请上传文档并描述你的任务目标，我会在对话中完成抽取、填表、生成与下载。',
+      createdAt: new Date().toISOString(),
+    },
+  ]
 })
 </script>
 
 <template>
-  <div class="container">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-title">FuChuang A23</div>
-        <div class="brand-sub">智能任务中台</div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>FuChuang 智能任务对话台</h1>
+        <p>所有任务在同一对话中完成：上传文档 → 描述任务 → 获取可预览/可下载结果。</p>
       </div>
-      <button
-        v-for="tab in tabs"
-        :key="tab"
-        :class="{ active: activeTab === tab }"
-        @click="activeTab = tab"
-      >
-        {{ tab }}
-      </button>
-    </aside>
+      <div class="status" v-if="selectedDocs.length">已选数据源：{{ selectedDocs.length }}</div>
+    </header>
 
-    <main class="content">
-      <div class="banner success" v-if="successMessage">{{ successMessage }}</div>
-      <div class="banner error" v-if="errorMessage">{{ errorMessage }}</div>
+    <div class="banner success" v-if="successMessage">{{ successMessage }}</div>
+    <div class="banner error" v-if="errorMessage">{{ errorMessage }}</div>
 
-      <section v-if="activeTab === '对话任务'">
-        <div class="card hero">
-          <div>
-            <h3>模型对话框（统一任务入口）</h3>
-            <p class="small">问答 / 抽取 / 填表 / 生成在同一入口执行，支持来源文档与模板联动。</p>
-          </div>
-          <div class="chips">
-            <button class="chip" v-for="prompt in quickPrompts" :key="prompt" @click="usePrompt(prompt)">{{ prompt }}</button>
-          </div>
+    <div class="layout">
+      <section class="chat-panel">
+        <div class="card quick-prompts">
+          <button class="chip" v-for="prompt in quickPrompts" :key="prompt" @click="usePrompt(prompt)">{{ prompt }}</button>
         </div>
 
-        <div class="card">
-          <textarea v-model="message" rows="4" placeholder="输入任务，如：根据模板提取城市GDP并自动填表" />
-          <div class="row mt8">
-            <select v-model="outputFormat" class="w-auto">
+        <div class="card messages">
+          <article class="msg" :class="msg.role" v-for="msg in chatMessages" :key="msg.id">
+            <div class="avatar">{{ msg.role === 'user' ? '我' : msg.role === 'assistant' ? 'AI' : 'SYS' }}</div>
+            <div class="bubble">
+              <div class="content">{{ msg.text }}</div>
+
+              <div class="meta" v-if="msg.selectedDocs?.length">来源文档：{{ msg.selectedDocs.join('、') }}</div>
+
+              <div class="trace" v-if="msg.trace?.length">
+                <div class="trace-title">执行追踪</div>
+                <div class="trace-line" v-for="(step, idx) in msg.trace" :key="step + idx">• {{ step }}</div>
+              </div>
+
+              <div class="mapping" v-if="msg.mappedFields && Object.keys(msg.mappedFields).length">
+                <div class="trace-title">字段映射</div>
+                <div class="map-item" v-for="(value, key) in msg.mappedFields" :key="key">
+                  <span>{{ key }}</span>
+                  <span>{{ value }}</span>
+                </div>
+              </div>
+
+              <div class="citation" v-if="msg.citations?.length">
+                <div class="trace-title">引用片段</div>
+                <div class="citation-item" v-for="c in msg.citations" :key="c.documentId + c.snippet">
+                  <b>{{ c.documentName }}</b>
+                  <div>{{ c.snippet }}</div>
+                </div>
+              </div>
+
+              <div class="output-list" v-if="msg.outputs?.length">
+                <div class="trace-title">任务产物</div>
+                <div class="output-item" v-for="o in msg.outputs" :key="o.id">
+                  <div>{{ o.name }}</div>
+                  <div class="row">
+                    <button class="secondary" @click="previewOutput(o.id)">预览</button>
+                    <a class="secondary" :href="downloadUrl('out', o.id)" target="_blank">下载</a>
+                    <button class="secondary" @click="saveOutputToKnowledge(o.id)">入知识库</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="card composer">
+          <div class="row">
+            <textarea v-model="message" rows="3" placeholder="输入任务需求，例如：请从附件中提取字段并自动填充模板，输出xlsx" />
+          </div>
+
+          <div class="row">
+            <select v-model="outputFormat" class="w-small">
               <option value="txt">txt</option>
               <option value="md">md</option>
               <option value="docx">docx</option>
               <option value="xlsx">xlsx</option>
             </select>
-            <label><input type="checkbox" v-model="createOutput" /> 生成输出文件</label>
-            <label><input type="checkbox" v-model="saveOutputToKb" /> 输出后保存到知识库</label>
-          </div>
-
-          <div class="row mt8">
-            <select v-model="templateDocumentId" class="w-40">
+            <select v-model="templateDocumentId" class="w-medium">
               <option value="">（可选）模板文件</option>
               <option v-for="d in docs" :key="d.id" :value="d.id">{{ d.name }}</option>
             </select>
-            <select v-model="sourceDocumentIds" multiple class="w-60 multi-select">
-              <option v-for="d in docs" :key="d.id" :value="d.id">{{ d.name }}</option>
-            </select>
+            <label><input type="checkbox" v-model="createOutput" /> 生成文件</label>
+            <label><input type="checkbox" v-model="saveOutputToKb" /> 自动入库</label>
           </div>
 
-          <button class="primary mt8" :disabled="loading" @click="sendChat">
-            {{ loading ? '处理中...' : '执行任务' }}
-          </button>
-        </div>
-
-        <div class="grid two">
-          <div class="card" v-if="chatAnswer">
-            <h4>回答</h4>
-            <pre>{{ chatAnswer }}</pre>
-          </div>
-
-          <div class="card" v-if="chatTrace.length">
-            <h4>任务追踪</h4>
-            <div class="trace-item" v-for="(step, idx) in chatTrace" :key="step + idx">
-              <span class="dot"></span>
-              <span>{{ step }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" v-if="totalMappedFields">
-          <h4>字段自动映射（{{ totalMappedFields }}）</h4>
-          <div class="mapping-grid">
-            <div class="mapping-item" v-for="(value, key) in mappedFields" :key="key">
-              <div class="small">{{ key }}</div>
-              <div>{{ value }}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" v-if="chatCitations.length">
-          <h4>引用片段</h4>
-          <div class="list-item" v-for="c in chatCitations" :key="c.documentId + c.snippet">
-            <div><b>{{ c.documentName }}</b></div>
-            <div class="small">{{ c.snippet }}</div>
-          </div>
-        </div>
-
-        <div class="card" v-if="chatOutputs.length">
-          <h4>任务产物</h4>
-          <div class="list-item" v-for="o in chatOutputs" :key="o.id">
-            <div><b>{{ o.name }}</b> <span class="small">{{ o.createdAt }}</span></div>
-            <div class="row mt8">
-              <button class="secondary" @click="previewOutput(o.id)">预览</button>
-              <a class="secondary" :href="downloadUrl('out', o.id)" target="_blank">下载</a>
-              <button class="secondary" @click="saveOutputToKnowledge(o.id)">保存到知识库</button>
-            </div>
+          <div class="row">
+            <input type="file" multiple @change="onUploadSelected" />
+            <button class="secondary" :disabled="uploadLoading" @click="uploadFilesToKb">
+              {{ uploadLoading ? '上传中...' : '上传到知识库并加入数据源' }}
+            </button>
+            <button class="primary" :disabled="loading" @click="sendChat">
+              {{ loading ? '执行中...' : '发送任务' }}
+            </button>
           </div>
         </div>
       </section>
 
-      <section v-else-if="activeTab === '知识库'">
+      <aside class="workspace-panel">
         <div class="card">
-          <h3>知识库上传与管理</h3>
-          <div class="row">
-            <input type="file" @change="onUploadSelected" />
-            <button class="primary" @click="uploadFile">上传并入库</button>
-          </div>
-        </div>
-        <div class="card">
-          <h4>文档列表（{{ docs.length }}）</h4>
-          <div class="list-item" v-for="d in docs" :key="d.id">
-            <div><b>{{ d.name }}</b> <span class="small">{{ d.extension }} / chunks={{ d.chunkCount }}</span></div>
-            <div class="row mt8">
-              <button class="secondary" @click="previewDocument(d.id)">预览</button>
-              <a class="secondary" :href="downloadUrl('doc', d.id)" target="_blank">下载</a>
+          <h3>知识库文档</h3>
+          <select v-model="selectedDocIds" multiple class="multi-select">
+            <option v-for="d in docs" :key="d.id" :value="d.id">{{ d.name }}</option>
+          </select>
+          <div class="doc-list">
+            <div class="doc-item" v-for="d in docs" :key="d.id">
+              <div>{{ d.name }}</div>
+              <div class="row">
+                <button class="secondary" @click="previewDocument(d.id)">预览</button>
+                <a class="secondary" :href="downloadUrl('doc', d.id)" target="_blank">下载</a>
+              </div>
             </div>
           </div>
         </div>
-        <div class="card" v-if="docPreview">
-          <h4>文档预览</h4>
-          <pre>{{ docPreview }}</pre>
-        </div>
-      </section>
 
-      <section v-else-if="activeTab === '模型配置'">
         <div class="card">
-          <h3>模型配置中心</h3>
+          <h3>模型配置</h3>
           <div class="row">
-            <select v-model="modelConfig.mode" class="w-auto">
+            <select v-model="modelConfig.mode" class="w-small">
               <option value="LOCAL">LOCAL</option>
               <option value="API">API</option>
             </select>
             <input v-model="modelConfig.modelName" placeholder="模型名" />
           </div>
-          <div class="mt8">
-            <input v-model="modelConfig.apiBaseUrl" placeholder="API Base URL（OpenAI兼容）" />
-          </div>
-          <div class="mt8">
-            <input v-model="modelConfig.apiKey" placeholder="API Key" />
-          </div>
-          <button class="primary mt8" @click="updateModelConfig">保存配置</button>
+          <input v-model="modelConfig.apiBaseUrl" placeholder="API Base URL" />
+          <input v-model="modelConfig.apiKey" placeholder="API Key" />
+          <button class="primary" @click="updateModelConfig">保存模型配置</button>
         </div>
-      </section>
 
-      <section v-else>
         <div class="card">
-          <h3>输出中心（{{ outputs.length }}）</h3>
-          <div class="list-item" v-for="o in outputs" :key="o.id">
-            <div><b>{{ o.name }}</b> <span class="small">{{ o.createdAt }}</span></div>
-            <div class="row mt8">
+          <h3>输出历史</h3>
+          <div class="doc-item" v-for="o in outputs" :key="o.id">
+            <div>{{ o.name }}</div>
+            <div class="row">
               <button class="secondary" @click="previewOutput(o.id)">预览</button>
               <a class="secondary" :href="downloadUrl('out', o.id)" target="_blank">下载</a>
-              <button class="secondary" @click="saveOutputToKnowledge(o.id)">保存到知识库</button>
             </div>
           </div>
         </div>
-        <div class="card" v-if="outputPreview">
-          <h4>输出预览</h4>
-          <pre>{{ outputPreview }}</pre>
-        </div>
-      </section>
-    </main>
+      </aside>
+    </div>
+
+    <div class="preview-grid" v-if="docPreview || outputPreview">
+      <div class="card" v-if="docPreview">
+        <h3>文档预览</h3>
+        <pre>{{ docPreview }}</pre>
+      </div>
+      <div class="card" v-if="outputPreview">
+        <h3>产物预览</h3>
+        <pre>{{ outputPreview }}</pre>
+      </div>
+    </div>
   </div>
 </template>
